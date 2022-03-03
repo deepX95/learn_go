@@ -30,16 +30,16 @@ const (
 )
 
 type hchan struct {
-	qcount   uint           // total data in the queue
-	dataqsiz uint           // size of the circular queue
-	buf      unsafe.Pointer // points to an array of dataqsiz elements
-	elemsize uint16
+	qcount   uint           // 队列中所有数据总数
+	dataqsiz uint           // 环形队列的 size
+	buf      unsafe.Pointer // 指向 dataqsiz 长度的数组     points to an array of dataqsiz elements
+	elemsize uint16         // 元素大小
 	closed   uint32
-	elemtype *_type // element type
-	sendx    uint   // send index
-	recvx    uint   // receive index
-	recvq    waitq  // list of recv waiters
-	sendq    waitq  // list of send waiters
+	elemtype *_type // 元素类型
+	sendx    uint   // 已发送的元素在环形队列中的位置
+	recvx    uint   // 已接收的元素在环形队列中的位置
+	recvq    waitq  // 接收者的等待队列
+	sendq    waitq  // 发送者的等待队列
 
 	// lock protects all fields in hchan, as well as several
 	// fields in sudogs blocked on this channel.
@@ -50,6 +50,7 @@ type hchan struct {
 	lock mutex
 }
 
+// waitq 是一个双向链表
 type waitq struct {
 	first *sudog
 	last  *sudog
@@ -72,13 +73,15 @@ func makechan(t *chantype, size int) *hchan {
 	elem := t.elem
 
 	// compiler checks this but be safe.
+	// 编译器检查数据项大小不能超过 64KB
 	if elem.size >= 1<<16 {
 		throw("makechan: invalid channel element type")
 	}
+	// 检查对齐是否正确
 	if hchanSize%maxAlign != 0 || elem.align > maxAlign {
 		throw("makechan: bad alignment")
 	}
-
+	// 缓冲区大小检查，判断是否溢出
 	mem, overflow := math.MulUintptr(elem.size, uintptr(size))
 	if overflow || mem > maxAlloc-hchanSize || size < 0 {
 		panic(plainError("makechan: size out of range"))
@@ -92,20 +95,25 @@ func makechan(t *chantype, size int) *hchan {
 	switch {
 	case mem == 0:
 		// Queue or element size is zero.
+		// 队列或者元素大小为 zero 时
 		c = (*hchan)(mallocgc(hchanSize, nil, true))
 		// Race detector uses this location for synchronization.
+		// Race 竞争检查利用这个地址来进行同步操作
 		c.buf = c.raceaddr()
 	case elem.ptrdata == 0:
 		// Elements do not contain pointers.
 		// Allocate hchan and buf in one call.
+		// 元素不包含指针时。一次分配 hchan 和 buf 的内存。
 		c = (*hchan)(mallocgc(hchanSize+mem, nil, true))
 		c.buf = add(unsafe.Pointer(c), hchanSize)
 	default:
 		// Elements contain pointers.
+		// 元素包含指针时
 		c = new(hchan)
 		c.buf = mallocgc(mem, elem, true)
 	}
 
+	// 设置属性
 	c.elemsize = uint16(elem.size)
 	c.elemtype = elem
 	c.dataqsiz = uint(size)
