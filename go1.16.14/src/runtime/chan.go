@@ -241,7 +241,9 @@ func chansend(c *hchan, ep unsafe.Pointer, block bool, callerpc uintptr) bool {
 	}
 
 	// Block on the channel. Some receiver will complete our operation for us.
+	// 获取当前 goroutine 的指针
 	gp := getg()
+	// 获取一个 sudog，可能是新建的 sudog，也有可能是从缓存中获取的
 	mysg := acquireSudog()
 	mysg.releasetime = 0
 	if t0 != 0 {
@@ -256,12 +258,17 @@ func chansend(c *hchan, ep unsafe.Pointer, block bool, callerpc uintptr) bool {
 	mysg.c = c
 	gp.waiting = mysg
 	gp.param = nil
+
+	// 将配置好的 sudog 加入待发送的等待队列
 	c.sendq.enqueue(mysg)
+
 	// Signal to anyone trying to shrink our stack that we're about
 	// to park on a channel. The window between when this G's status
 	// changes and when we set gp.activeStackChans is not safe for
 	// stack shrinking.
 	atomic.Store8(&gp.parkingOnChan, 1)
+
+	// 挂起当前goroutine，状态为 waitReasonChanSend，阻塞等待 channel
 	gopark(chanparkcommit, unsafe.Pointer(&c.lock), waitReasonChanSend, traceEvGoBlockSend, 2)
 	// Ensure the value being sent is kept alive until the
 	// receiver copies it out. The sudog has a pointer to the
@@ -498,6 +505,7 @@ func chanrecv(c *hchan, ep unsafe.Pointer, block bool) (selected, received bool)
 		// Sequential consistency is also required here, when racing with such a send.
 		if empty(c) {
 			// The channel is irreversibly closed and empty.
+			// channel 不可逆的关闭了且为空
 			if raceenabled {
 				raceacquire(c.raceaddr())
 			}

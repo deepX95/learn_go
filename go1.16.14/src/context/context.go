@@ -63,6 +63,7 @@ type Context interface {
 	// Deadline returns the time when work done on behalf of this context
 	// should be canceled. Deadline returns ok==false when no deadline is
 	// set. Successive calls to Deadline return the same results.
+	// 返回 context 是否会被取消以及自动取消时间（即 deadline）
 	Deadline() (deadline time.Time, ok bool)
 
 	// Done returns a channel that's closed when work done on behalf of this
@@ -96,6 +97,7 @@ type Context interface {
 	//
 	// See https://blog.golang.org/pipelines for more examples of how to use
 	// a Done channel for cancellation.
+	// 当 context 被取消或者到了 deadline，返回一个被关闭的 channel
 	Done() <-chan struct{}
 
 	// If Done is not yet closed, Err returns nil.
@@ -103,6 +105,7 @@ type Context interface {
 	// Canceled if the context was canceled
 	// or DeadlineExceeded if the context's deadline passed.
 	// After Err returns a non-nil error, successive calls to Err return the same error.
+	// 在 channel Done 关闭后，返回 context 取消原因
 	Err() error
 
 	// Value returns the value associated with this context for key, or nil
@@ -150,6 +153,7 @@ type Context interface {
 	// 		u, ok := ctx.Value(userKey).(*User)
 	// 		return u, ok
 	// 	}
+	// 获取 key 对应的 value
 	Value(key interface{}) interface{}
 }
 
@@ -247,6 +251,7 @@ func newCancelCtx(parent Context) cancelCtx {
 var goroutines int32
 
 // propagateCancel arranges for child to be canceled when parent is.
+// propagateCancel 向下传递 context 节点间的取消关系
 func propagateCancel(parent Context, child canceler) {
 	done := parent.Done()
 	if done == nil {
@@ -294,6 +299,7 @@ var cancelCtxKey int
 // parent.Done() matches that *cancelCtx. (If not, the *cancelCtx
 // has been wrapped in a custom implementation providing a
 // different done channel, in which case we should not bypass it.)
+// 找到第一个可取消的父节点
 func parentCancelCtx(parent Context) (*cancelCtx, bool) {
 	done := parent.Done()
 	if done == closedchan || done == nil {
@@ -313,6 +319,7 @@ func parentCancelCtx(parent Context) (*cancelCtx, bool) {
 }
 
 // removeChild removes a context from its parent.
+// 去掉父节点的孩子节点
 func removeChild(parent Context, child canceler) {
 	p, ok := parentCancelCtx(parent)
 	if !ok {
@@ -344,6 +351,7 @@ func init() {
 type cancelCtx struct {
 	Context
 
+	// 保护之后的字段
 	mu       sync.Mutex            // protects following fields
 	done     chan struct{}         // created lazily, closed by first cancel call
 	children map[canceler]struct{} // set to nil by the first cancel call

@@ -360,9 +360,11 @@ func acquireSudog() *sudog {
 	// which keeps the garbage collector from being invoked.
 	mp := acquirem()
 	pp := mp.p.ptr()
+	// 如果本地缓存为空
 	if len(pp.sudogcache) == 0 {
 		lock(&sched.sudoglock)
 		// First, try to grab a batch from central cache.
+		// 首先尝试将全局中央缓存存一部分到本地
 		for len(pp.sudogcache) < cap(pp.sudogcache)/2 && sched.sudogcache != nil {
 			s := sched.sudogcache
 			sched.sudogcache = s.next
@@ -371,10 +373,12 @@ func acquireSudog() *sudog {
 		}
 		unlock(&sched.sudoglock)
 		// If the central cache is empty, allocate a new one.
+		// 如果全局中央缓存是空的，则 allocate 一个新的
 		if len(pp.sudogcache) == 0 {
 			pp.sudogcache = append(pp.sudogcache, new(sudog))
 		}
 	}
+	// 从尾部提取，并调整本地缓存
 	n := len(pp.sudogcache)
 	s := pp.sudogcache[n-1]
 	pp.sudogcache[n-1] = nil
