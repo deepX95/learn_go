@@ -36,6 +36,9 @@ type Map struct {
 	// Entries stored in read may be updated concurrently without mu, but updating
 	// a previously-expunged entry requires that the entry be copied to the dirty
 	// map and unexpunged with mu held.
+	//
+	// 基本上你可以把它看成一个安全的只读的map
+	// 它包含的元素其实也是通过原子操作更新的，但是已删除的entry就需要加锁操作了
 	read atomic.Value // readOnly
 
 	// dirty contains the portion of the map's contents that require mu to be
@@ -48,6 +51,9 @@ type Map struct {
 	//
 	// If the dirty map is nil, the next write to the map will initialize it by
 	// making a shallow copy of the clean map, omitting stale entries.
+	//
+	// 包含需要加锁才能访问的元素
+	// 包括所有在read字段中但未被expunged（删除）的元素以及新加的元素
 	dirty map[interface{}]*entry
 
 	// misses counts the number of loads since the read map was last updated that
@@ -56,20 +62,25 @@ type Map struct {
 	// Once enough misses have occurred to cover the cost of copying the dirty
 	// map, the dirty map will be promoted to the read map (in the unamended
 	// state) and the next store to the map will make a new dirty copy.
+	// 记录从read中读取miss的次数，一旦miss数和dirty长度一样了，就会把dirty提升为read，并把dirty置空
 	misses int
 }
 
 // readOnly is an immutable struct stored atomically in the Map.read field.
 type readOnly struct {
 	m       map[interface{}]*entry
-	amended bool // true if the dirty map contains some key not in m.
+	amended bool // 当dirty中包含read没有的数据时为true，比如新增一条数据.
 }
 
 // expunged is an arbitrary pointer that marks entries which have been deleted
 // from the dirty map.
+//
+// expunged是用来标识此项已经删掉的指针
+// 当map中的一个项目被删除了，只是把它的值标记为expunged，以后才有机会真正删除此项
 var expunged = unsafe.Pointer(new(interface{}))
 
 // An entry is a slot in the map corresponding to a particular key.
+// entry代表一个值
 type entry struct {
 	// p points to the interface{} value stored for the entry.
 	//
@@ -100,28 +111,35 @@ func newEntry(i interface{}) *entry {
 // value is present.
 // The ok result indicates whether value was found in the map.
 func (m *Map) Load(key interface{}) (value interface{}, ok bool) {
+	// 首先从read处理
 	read, _ := m.read.Load().(readOnly)
 	e, ok := read.m[key]
-	if !ok && read.amended {
+	// 如果没在read中找到，并且amended为true，即dirty中存在read中没有的key
+	if !ok && read.amended { // 如果不存在并且dirty不为nil(有新的元素)
 		m.mu.Lock()
 		// Avoid reporting a spurious miss if m.dirty got promoted while we were
 		// blocked on m.mu. (If further loads of the same key will not miss, it's
 		// not worth copying the dirty map for this key.)
+		//
+		// 双检查，看看read中现在是否存在此key
 		read, _ = m.read.Load().(readOnly)
 		e, ok = read.m[key]
-		if !ok && read.amended {
-			e, ok = m.dirty[key]
+		if !ok && read.amended { // 依然不存在，并且dirty不为nil
+			e, ok = m.dirty[key] // 从dirty中读取
 			// Regardless of whether the entry was present, record a miss: this key
 			// will take the slow path until the dirty map is promoted to the read
 			// map.
+			//
+			// 不管dirty中存不存在，miss数都加1
 			m.missLocked()
 		}
 		m.mu.Unlock()
 	}
+	// 如果没找到，返回空，false
 	if !ok {
 		return nil, false
 	}
-	return e.load()
+	return e.load() // 返回读取的对象，e既可能是从read中获得的，也可能是从dirty中获得的
 }
 
 func (e *entry) load() (value interface{}, ok bool) {
@@ -134,30 +152,38 @@ func (e *entry) load() (value interface{}, ok bool) {
 
 // Store sets the value for a key.
 func (m *Map) Store(key, value interface{}) {
+	// 如果read map中存在该key则尝试直接更改
+	// 由于修改的是entry内部的pointer，因此对dirty map也可见
 	read, _ := m.read.Load().(readOnly)
 	if e, ok := read.m[key]; ok && e.tryStore(&value) {
 		return
 	}
 
+	// read中不存在，或者cas更新失败，就需要加锁访问dirty了
 	m.mu.Lock()
 	read, _ = m.read.Load().(readOnly)
-	if e, ok := read.m[key]; ok {
+	if e, ok := read.m[key]; ok { // 双检查，看看read是否已经存在了
 		if e.unexpungeLocked() {
 			// The entry was previously expunged, which implies that there is a
 			// non-nil dirty map and this entry is not in it.
+			//
+			// 此项目先前已经被删除了，通过将它的值设置为nil，标记为unexpunged
 			m.dirty[key] = e
 		}
-		e.storeLocked(&value)
-	} else if e, ok := m.dirty[key]; ok {
-		e.storeLocked(&value)
+		e.storeLocked(&value) // 更新
+	} else if e, ok := m.dirty[key]; ok { // 如果dirty中有此项
+		e.storeLocked(&value) // 直接更新
 	} else {
-		if !read.amended {
+		if !read.amended { // 如果dirty为nil
 			// We're adding the first new key to the dirty map.
 			// Make sure it is allocated and mark the read-only map as incomplete.
+			//
+			// 需要创建dirty对象，并且标记read的amended为true,
+			// 说明有元素它不包含而dirty包含
 			m.dirtyLocked()
 			m.read.Store(readOnly{m: read.m, amended: true})
 		}
-		m.dirty[key] = newEntry(value)
+		m.dirty[key] = newEntry(value) // 将新值增加到dirty对象中
 	}
 	m.mu.Unlock()
 }
@@ -166,10 +192,12 @@ func (m *Map) Store(key, value interface{}) {
 //
 // If the entry is expunged, tryStore returns false and leaves the entry
 // unchanged.
+// 如果entry没被删，tryStore存储值到entry中
+// 如果p=expunged，即entry被删，那么返回false
 func (e *entry) tryStore(i *interface{}) bool {
 	for {
 		p := atomic.LoadPointer(&e.p)
-		if p == expunged {
+		if p == expunged { // 键是否删除
 			return false
 		}
 		if atomic.CompareAndSwapPointer(&e.p, p, unsafe.Pointer(i)) {
@@ -182,6 +210,8 @@ func (e *entry) tryStore(i *interface{}) bool {
 //
 // If the entry was previously expunged, it must be added to the dirty map
 // before m.mu is unlocked.
+// unexpungeLocked函数确保了entry没有被标记成已被删除
+// 如果entry先前被清除过了，那么在mutex解锁之前，它一定要被加入到dirty map中
 func (e *entry) unexpungeLocked() (wasExpunged bool) {
 	return atomic.CompareAndSwapPointer(&e.p, expunged, nil)
 }
@@ -349,24 +379,25 @@ func (m *Map) Range(f func(key, value interface{}) bool) {
 }
 
 func (m *Map) missLocked() {
-	m.misses++
-	if m.misses < len(m.dirty) {
+	m.misses++                   // misses计数加一
+	if m.misses < len(m.dirty) { // 如果没达到阈值(dirty字段的长度),返回
 		return
 	}
-	m.read.Store(readOnly{m: m.dirty})
-	m.dirty = nil
-	m.misses = 0
+	// dirty map 晋升
+	m.read.Store(readOnly{m: m.dirty}) // 把dirty字段的内存提升为read字段
+	m.dirty = nil                      // 清空dirty
+	m.misses = 0                       // misses数重置为0
 }
 
 func (m *Map) dirtyLocked() {
-	if m.dirty != nil {
+	if m.dirty != nil { // 如果dirty字段已经存在，不需要创建了
 		return
 	}
 
-	read, _ := m.read.Load().(readOnly)
+	read, _ := m.read.Load().(readOnly) // 获取read字段
 	m.dirty = make(map[interface{}]*entry, len(read.m))
-	for k, e := range read.m {
-		if !e.tryExpungeLocked() {
+	for k, e := range read.m { // 遍历read字段
+		if !e.tryExpungeLocked() { // 把非punged的键值对复制到dirty中
 			m.dirty[k] = e
 		}
 	}
