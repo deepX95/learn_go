@@ -34,12 +34,12 @@ type hchan struct {
 	dataqsiz uint           // 环形队列的 size
 	buf      unsafe.Pointer // 指向 dataqsiz 长度的数组     points to an array of dataqsiz elements
 	elemsize uint16         // 元素大小
-	closed   uint32
-	elemtype *_type // 元素类型
-	sendx    uint   // 已发送的元素在环形队列中的位置
-	recvx    uint   // 已接收的元素在环形队列中的位置
-	recvq    waitq  // 接收者的等待队列
-	sendq    waitq  // 发送者的等待队列
+	closed   uint32         // 关闭标志
+	elemtype *_type         // 元素类型
+	sendx    uint           // 已发送的元素在环形队列中的位置
+	recvx    uint           // 已接收的元素在环形队列中的位置
+	recvq    waitq          // 接收者的等待队列
+	sendq    waitq          // 发送者的等待队列
 
 	// lock protects all fields in hchan, as well as several
 	// fields in sudogs blocked on this channel.

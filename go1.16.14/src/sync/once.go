@@ -55,6 +55,10 @@ func (o *Once) Do(f func()) {
 	// the atomic.StoreUint32 must be delayed until after f returns.
 
 	//判断f是否被执行
+	//
+	// 这里不用CAS保证只执行一次
+	// 比如：当 o.done 判断为 0 的时候，立即就设置成了 1 ，这个时候才走到 f() 函数里执行，这里的语义不再正确
+	// Once 不仅要保证只执行一次，还要保证当其他用户看到 o.done==1 导致 Once.Do 返回的时候，确保执行完成。
 	if atomic.LoadUint32(&o.done) == 0 {
 		// Outlined slow-path to allow inlining of the fast-path.
 		// 可能会存在并发 进入slow-path
@@ -67,6 +71,7 @@ func (o *Once) doSlow(f func()) {
 	defer o.m.Unlock()
 	// 二次判断f是否已经被执行
 	if o.done == 0 {
+		// 用 defer 机制保证 panic 的场景，也能够保证 o.done 标识位被设置
 		defer atomic.StoreUint32(&o.done, 1)
 		f()
 	}
